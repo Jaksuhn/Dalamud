@@ -15,6 +15,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Configuration.Internal;
 using Dalamud.Console;
 using Dalamud.Game.Command;
+using Dalamud.Game.Player;
 using Dalamud.Interface.Animation.EasingFunctions;
 using Dalamud.Interface.Colors;
 using Dalamud.Interface.Components;
@@ -236,6 +237,9 @@ internal class PluginInstallerWindow : Window, IDisposable
         Testing,
         Updateable,
         Dev,
+        Enabled,
+        Disabled,
+        Incompatible,
     }
 
     private bool AnyOperationInProgress => this.installStatus == OperationStatus.InProgress ||
@@ -282,7 +286,7 @@ internal class PluginInstallerWindow : Window, IDisposable
     {
         var pluginManager = Service<PluginManager>.Get();
 
-        _ = pluginManager.ReloadPluginMastersAsync();
+        _ = pluginManager.ReloadAllReposAsync();
         _ = pluginManager.ScanDevPluginsAsync();
 
         if (!this.isSearchTextPrefilled)
@@ -1454,6 +1458,15 @@ internal class PluginInstallerWindow : Window, IDisposable
             if (filter == InstalledPluginListFilter.Testing && !manager.HasTestingOptIn(plugin.Manifest))
                 continue;
 
+            if (filter == InstalledPluginListFilter.Enabled && (!plugin.IsWantedByAnyProfile || plugin.IsOutdated || plugin.IsBanned || plugin.IsOrphaned || plugin.IsDecommissioned))
+                continue;
+
+            if (filter == InstalledPluginListFilter.Disabled && (plugin.IsWantedByAnyProfile || plugin.IsOutdated || plugin.IsBanned || plugin.IsOrphaned || plugin.IsDecommissioned))
+                continue;
+
+            if (filter == InstalledPluginListFilter.Incompatible && !(plugin.IsOutdated || plugin.IsBanned || plugin.IsOrphaned || plugin.IsDecommissioned))
+                continue;
+
             // Find applicable update and manifest, if we have them
             AvailablePluginUpdate? update = null;
             RemotePluginManifest? remoteManifest = null;
@@ -1486,6 +1499,9 @@ internal class PluginInstallerWindow : Window, IDisposable
                 InstalledPluginListFilter.Testing => Locs.TabBody_NoPluginsTesting,
                 InstalledPluginListFilter.Updateable => Locs.TabBody_NoPluginsUpdateable,
                 InstalledPluginListFilter.Dev => Locs.TabBody_NoPluginsDev,
+                InstalledPluginListFilter.Enabled => Locs.TabBody_NoPluginsEnabled,
+                InstalledPluginListFilter.Disabled => Locs.TabBody_NoPluginsDisabled,
+                InstalledPluginListFilter.Incompatible => Locs.TabBody_NoPluginsIncompatible,
                 _ => throw new ArgumentException(null, nameof(filter)),
             };
 
@@ -1724,6 +1740,18 @@ internal class PluginInstallerWindow : Window, IDisposable
 
                     case PluginCategoryManager.CategoryKind.UpdateablePlugins:
                         this.DrawInstalledPluginList(InstalledPluginListFilter.Updateable);
+                        break;
+
+                    case PluginCategoryManager.CategoryKind.EnabledPlugins:
+                        this.DrawInstalledPluginList(InstalledPluginListFilter.Enabled);
+                        break;
+
+                    case PluginCategoryManager.CategoryKind.DisabledPlugins:
+                        this.DrawInstalledPluginList(InstalledPluginListFilter.Disabled);
+                        break;
+
+                    case PluginCategoryManager.CategoryKind.IncompatiblePlugins:
+                        this.DrawInstalledPluginList(InstalledPluginListFilter.Incompatible);
                         break;
 
                     case PluginCategoryManager.CategoryKind.PluginProfiles:
@@ -2613,7 +2641,6 @@ internal class PluginInstallerWindow : Window, IDisposable
             {
                 configuration.SeenPluginInternalName.AddRange(this.pluginListAvailable.Select(x => x.InternalName));
                 configuration.QueueSave();
-                pluginManager.RefilterPluginMasters();
             }
 
             var isHidden = configuration.HiddenPluginInternalName.Contains(manifest.InternalName);
@@ -2622,12 +2649,10 @@ internal class PluginInstallerWindow : Window, IDisposable
                 case false when ImGui.Selectable(Locs.PluginContext_HidePlugin):
                     configuration.HiddenPluginInternalName.Add(manifest.InternalName);
                     configuration.QueueSave();
-                    pluginManager.RefilterPluginMasters();
                     break;
                 case true when ImGui.Selectable(Locs.PluginContext_UnhidePlugin):
                     configuration.HiddenPluginInternalName.Remove(manifest.InternalName);
                     configuration.QueueSave();
-                    pluginManager.RefilterPluginMasters();
                     break;
             }
 
@@ -3030,7 +3055,7 @@ internal class PluginInstallerWindow : Window, IDisposable
                     }
 
                     configuration.QueueSave();
-                    _ = pluginManager.ReloadPluginMastersAsync();
+                    _ = pluginManager.ReloadAllReposAsync();
                 }
 
                 if (repoManifest?.IsTestingExclusive == true)
@@ -3149,7 +3174,7 @@ internal class PluginInstallerWindow : Window, IDisposable
                         .GetAwaiter().GetResult();
                 }
 
-                Task.Run(profileManager.ApplyAllWantStatesAsync)
+                Task.Run(() => profileManager.ApplyAllWantStatesAsync("Remove from profile"))
                     .ContinueWith(this.DisplayErrorContinuation, Locs.ErrorModal_ProfileApplyFail);
             }
 
@@ -3162,6 +3187,8 @@ internal class PluginInstallerWindow : Window, IDisposable
         var inMultipleProfiles = !isDefaultPlugin && !isInSingleProfile;
         var inSingleNonDefaultProfileWhichIsDisabled =
             isInSingleProfile && !profilesThatWantThisPlugin.First().IsEnabled;
+        var inSingleNonDefaultProfileWhichDoesNotWantActive =
+            isInSingleProfile && !profilesThatWantThisPlugin.First().CheckWantsActiveFromGameState(Service<PlayerState>.Get().ContentId);
 
         if (plugin.State is PluginState.UnloadError or PluginState.LoadError or PluginState.DependencyResolutionFailed && !plugin.IsDev && !plugin.IsOutdated)
         {
@@ -3174,7 +3201,7 @@ internal class PluginInstallerWindow : Window, IDisposable
         {
             ImGuiComponents.DisabledToggleButton(toggleId, this.loadingIndicatorKind == LoadingIndicatorKind.EnablingSingle);
         }
-        else if (disabled || inMultipleProfiles || inSingleNonDefaultProfileWhichIsDisabled || pluginManager.SafeMode)
+        else if (disabled || inMultipleProfiles || inSingleNonDefaultProfileWhichIsDisabled || inSingleNonDefaultProfileWhichDoesNotWantActive || pluginManager.SafeMode)
         {
             ImGuiComponents.DisabledToggleButton(toggleId, isLoadedAndUnloadable);
 
@@ -3184,6 +3211,8 @@ internal class PluginInstallerWindow : Window, IDisposable
                 ImGui.SetTooltip(Locs.PluginButtonToolTip_NeedsToBeInSingleProfile);
             else if (inSingleNonDefaultProfileWhichIsDisabled && ImGui.IsItemHovered())
                 ImGui.SetTooltip(Locs.PluginButtonToolTip_SingleProfileDisabled(profilesThatWantThisPlugin.First().Name));
+            else if (inSingleNonDefaultProfileWhichDoesNotWantActive && ImGui.IsItemHovered())
+                ImGui.SetTooltip(Locs.PluginButtonToolTip_SingleProfileDoesNotWantActive(profilesThatWantThisPlugin.First().Name));
         }
         else
         {
@@ -3804,7 +3833,7 @@ internal class PluginInstallerWindow : Window, IDisposable
         if (!manifest.Punchline.IsNullOrEmpty())
             scores.Add(matcher.Matches(manifest.Punchline.ToLowerInvariant()) * 100);
         if (manifest.Tags != null)
-            scores.Add(matcher.MatchesAny(manifest.Tags.ToArray()) * 100);
+            scores.Add(matcher.MatchesAny(manifest.Tags.Select(tag => tag.ToLowerInvariant()).ToArray()) * 100);
 
         return scores.Max();
     }
@@ -4098,6 +4127,12 @@ internal class PluginInstallerWindow : Window, IDisposable
 
         public static string TabBody_NoPluginsDev => Loc.Localize("InstallerNoPluginsDev", "You don't have any dev plugins. Add them from the settings.");
 
+        public static string TabBody_NoPluginsEnabled => Loc.Localize("InstallerNoPluginsEnabled", "You don't have any enabled plugins.");
+
+        public static string TabBody_NoPluginsDisabled => Loc.Localize("InstallerNoPluginsDisabled", "You don't have any disabled plugins.");
+
+        public static string TabBody_NoPluginsIncompatible => Loc.Localize("InstallerNoPluginsIncompatible", "You don't have any incompatible plugins.");
+
         #endregion
 
         #region Search text
@@ -4278,6 +4313,8 @@ internal class PluginInstallerWindow : Window, IDisposable
         public static string PluginButtonToolTip_SafeMode => Loc.Localize("InstallerButtonSafeModeTooltip", "Cannot enable plugins in safe mode.");
 
         public static string PluginButtonToolTip_SingleProfileDisabled(string name) => Loc.Localize("InstallerSingleProfileDisabled", "The collection '{0}' which contains this plugin is disabled.\nPlease enable it in the collections manager to toggle the plugin individually.").Format(name);
+
+        public static string PluginButtonToolTip_SingleProfileDoesNotWantActive(string name) => Loc.Localize("InstallerSingleProfileDoesNotWantActive", "The collection '{0}' which contains this plugin is active, but is not set to activate on this character.\nPlease change the collection's settings or remove the plugin from that collection to toggle the plugin individually.").Format(name);
 
         #endregion
 

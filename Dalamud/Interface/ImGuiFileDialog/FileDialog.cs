@@ -98,6 +98,11 @@ public partial class FileDialog
     }
 
     /// <summary>
+    /// An event fired when the selection changed.
+    /// </summary>
+    public event EventHandler<string>? SelectionChanged;
+
+    /// <summary>
     /// Shows the dialog.
     /// </summary>
     public void Show()
