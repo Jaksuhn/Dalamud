@@ -49,6 +49,9 @@ internal sealed unsafe class ChatGui : IInternalDisposableService, IChatGui
     private readonly Hook<RaptureLogModule.Delegates.Update> handleLogModuleUpdate;
 
     [ServiceManager.ServiceDependency]
+    private readonly Framework framework = Service<Framework>.Get();
+
+    [ServiceManager.ServiceDependency]
     private readonly DalamudConfiguration configuration = Service<DalamudConfiguration>.Get();
 
     private ImmutableDictionary<(string PluginName, uint CommandId), Action<uint, SeString>>? dalamudLinkHandlersCopy;
@@ -66,6 +69,8 @@ internal sealed unsafe class ChatGui : IInternalDisposableService, IChatGui
         this.inventoryItemCopyHook.Enable();
         this.handleLinkClickHook.Enable();
         this.handleLogModuleUpdate.Enable();
+
+        this.framework.BeforeUpdate += this.UpdateQueue;
     }
 
     /// <inheritdoc/>
@@ -111,6 +116,8 @@ internal sealed unsafe class ChatGui : IInternalDisposableService, IChatGui
     /// </summary>
     void IInternalDisposableService.DisposeService()
     {
+        this.framework.BeforeUpdate -= this.UpdateQueue;
+
         this.printMessageHook.Dispose();
         this.inventoryItemCopyHook.Dispose();
         this.handleLinkClickHook.Dispose();
@@ -204,56 +211,6 @@ internal sealed unsafe class ChatGui : IInternalDisposableService, IChatGui
     #endregion
 
     /// <summary>
-    /// Process a chat queue.
-    /// </summary>
-    public void UpdateQueue()
-    {
-        if (this.chatQueue.Count == 0)
-            return;
-
-        using var rssb = new RentedSeStringBuilder();
-        Span<byte> namebuf = stackalloc byte[256];
-        using var sender = new Utf8String();
-        using var message = new Utf8String();
-        while (this.chatQueue.TryDequeue(out var chat))
-        {
-            rssb.Builder.Clear();
-            foreach (var c in UtfEnumerator.From(chat.MessageBytes, UtfEnumeratorFlags.Utf8SeString))
-            {
-                if (c.IsSeStringPayload)
-                    rssb.Builder.Append((ReadOnlySeStringSpan)chat.MessageBytes.AsSpan(c.ByteOffset, c.ByteLength));
-                else if (c.Value.IntValue == 0x202F)
-                    rssb.Builder.BeginMacro(MacroCode.NonBreakingSpace).EndMacro();
-                else
-                    rssb.Builder.Append(c);
-            }
-
-            if (chat.NameBytes.Length + 1 < namebuf.Length)
-            {
-                chat.NameBytes.AsSpan().CopyTo(namebuf);
-                namebuf[chat.NameBytes.Length] = 0;
-                sender.SetString(namebuf);
-            }
-            else
-            {
-                sender.SetString(chat.NameBytes.NullTerminate());
-            }
-
-            message.SetString(rssb.Builder.GetViewAsSpan());
-
-            var targetChannel = chat.Type ?? this.configuration.GeneralChatType;
-
-            this.HandlePrintMessageDetour(
-                RaptureLogModule.Instance(),
-                (ushort)targetChannel,
-                &sender,
-                &message,
-                chat.Timestamp,
-                chat.Silent);
-        }
-    }
-
-    /// <summary>
     /// Create a link handler.
     /// </summary>
     /// <param name="pluginName">The name of the plugin handling the link.</param>
@@ -300,6 +257,57 @@ internal sealed unsafe class ChatGui : IInternalDisposableService, IChatGui
         {
             if (this.dalamudLinkHandlers.Remove((pluginName, commandId)))
                 this.dalamudLinkHandlersCopy = null;
+        }
+    }
+
+    /// <summary>
+    /// Process a chat queue.
+    /// </summary>
+    /// <param name="framework">The Framework instance.</param>
+    private void UpdateQueue(IFramework framework)
+    {
+        if (this.chatQueue.Count == 0)
+            return;
+
+        using var rssb = new RentedSeStringBuilder();
+        Span<byte> namebuf = stackalloc byte[256];
+        using var sender = new Utf8String();
+        using var message = new Utf8String();
+        while (this.chatQueue.TryDequeue(out var chat))
+        {
+            rssb.Builder.Clear();
+            foreach (var c in UtfEnumerator.From(chat.MessageBytes, UtfEnumeratorFlags.Utf8SeString))
+            {
+                if (c.IsSeStringPayload)
+                    rssb.Builder.Append((ReadOnlySeStringSpan)chat.MessageBytes.AsSpan(c.ByteOffset, c.ByteLength));
+                else if (c.Value.IntValue == 0x202F)
+                    rssb.Builder.BeginMacro(MacroCode.NonBreakingSpace).EndMacro();
+                else
+                    rssb.Builder.Append(c);
+            }
+
+            if (chat.NameBytes.Length + 1 < namebuf.Length)
+            {
+                chat.NameBytes.AsSpan().CopyTo(namebuf);
+                namebuf[chat.NameBytes.Length] = 0;
+                sender.SetString(namebuf);
+            }
+            else
+            {
+                sender.SetString(chat.NameBytes.NullTerminate());
+            }
+
+            message.SetString(rssb.Builder.GetViewAsSpan());
+
+            var targetChannel = chat.Type ?? this.configuration.GeneralChatType;
+
+            this.HandlePrintMessageDetour(
+                RaptureLogModule.Instance(),
+                (ushort)targetChannel,
+                &sender,
+                &message,
+                chat.Timestamp,
+                chat.Silent);
         }
     }
 
