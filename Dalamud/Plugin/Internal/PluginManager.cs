@@ -257,11 +257,6 @@ internal class PluginManager : IInternalDisposableService
     public PluginConfigurations PluginConfigs { get; }
 
     /// <summary>
-    /// Gets or sets a value indicating whether plugins of all API levels will be loaded.
-    /// </summary>
-    public bool LoadAllApiLevels { get; set; }
-
-    /// <summary>
     /// Gets or sets a value indicating whether banned plugins will be loaded.
     /// </summary>
     public bool LoadBannedPlugins { get; set; }
@@ -361,7 +356,7 @@ internal class PluginManager : IInternalDisposableService
     /// </summary>
     /// <param name="manifest">Manifest to check.</param>
     /// <returns>A value indicating whether testing can be used.</returns>
-    public bool CanUseTesting(IPluginManifest manifest)
+    public bool CanUseTesting(RemotePluginManifest manifest)
     {
         if (!this.configuration.DoPluginTest)
             return false;
@@ -378,7 +373,7 @@ internal class PluginManager : IInternalDisposableService
     /// </summary>
     /// <param name="manifest">Manifest to check.</param>
     /// <returns>A value indicating whether testing should be used.</returns>
-    public bool UseTesting(IPluginManifest manifest)
+    public bool UseTesting(RemotePluginManifest manifest)
     {
         return this.CanUseTesting(manifest) && this.HasTestingOptIn(manifest);
     }
@@ -506,10 +501,11 @@ internal class PluginManager : IInternalDisposableService
                         continue;
                     }
 
-                    if (manifest.IsTestingExclusive && this.configuration.PluginTestingOptIns!.All(x => x.InternalName != manifest.InternalName))
-                        this.configuration.PluginTestingOptIns.Add(new PluginTestingOptIn(manifest.InternalName));
+                    // NOTE(goat): We don't know this anymore after the manifest migration, but it shouldn't matter anymore, everyone should be migrated
+                    // if (manifest.IsTestingExclusive && this.configuration.PluginTestingOptIns!.All(x => x.InternalName != manifest.InternalName))
+                    //    this.configuration.PluginTestingOptIns.Add(new PluginTestingOptIn(manifest.InternalName));
 
-                    versionsDefs.Add(new PluginDef(dllFile, manifest, false));
+                    versionsDefs.Add(new PluginDef(dllFile, manifest, null));
                 }
                 catch (Exception ex)
                 {
@@ -527,7 +523,7 @@ internal class PluginManager : IInternalDisposableService
 
             try
             {
-                pluginDefs.Add(versionsDefs.MaxBy(x => x.Manifest!.EffectiveVersion));
+                pluginDefs.Add(versionsDefs.MaxBy(x => x.Manifest!.AssemblyVersion));
             }
             catch (Exception ex)
             {
@@ -535,63 +531,60 @@ internal class PluginManager : IInternalDisposableService
             }
         }
 
-        // devPlugins are more freeform. Look for any dll and hope to get lucky.
-        var devDllFiles = new List<FileInfo>();
-
-        foreach (var setting in this.configuration.DevPluginLoadLocations)
-        {
-            if (!setting.IsEnabled)
-                continue;
-
-            if (Directory.Exists(setting.Path))
-            {
-                devDllFiles.AddRange(new DirectoryInfo(setting.Path).GetFiles("*.dll", SearchOption.AllDirectories));
-            }
-            else if (File.Exists(setting.Path))
-            {
-                devDllFiles.Add(new FileInfo(setting.Path));
-            }
-        }
-
-        foreach (var dllFile in devDllFiles)
-        {
-            try
-            {
-                // Manifests are now required for devPlugins
-                var manifestFile = LocalPluginManifest.GetManifestFile(dllFile);
-                if (!manifestFile.Exists)
-                {
-                    Log.Error("DLL at {DllPath} has no manifest, this is no longer valid", dllFile.FullName);
-                    continue;
-                }
-
-                var manifest = LocalPluginManifest.Load(manifestFile);
-                if (manifest == null)
-                {
-                    Log.Error("Could not deserialize manifest for DLL at {DllPath}", dllFile.FullName);
-                    continue;
-                }
-
-                if (manifest != null && manifest.InternalName.IsNullOrEmpty())
-                {
-                    Log.Error("InternalName for dll at {Path} was null", manifestFile.FullName);
-                    continue;
-                }
-
-                devPluginDefs.Add(new PluginDef(dllFile, manifest, true));
-            }
-            catch (Exception ex)
-            {
-                Log.Error(ex, "Could not load manifest for dev at {Directory}", dllFile.FullName);
-            }
-        }
-
         // Sort for load order - unloaded definitions have default priority of 0
         pluginDefs.Sort(PluginDef.Sorter);
-        devPluginDefs.Sort(PluginDef.Sorter);
 
-        // Dev plugins should load first.
-        pluginDefs.InsertRange(0, devPluginDefs);
+        var isDevModeEnabled = this.configuration.DevMode == true;
+        if (isDevModeEnabled)
+        {
+            foreach (var loadLocation in this.configuration.DevPluginLoadLocations)
+            {
+                if (!loadLocation.IsEnabled)
+                    continue;
+
+                var fileInfo = new FileInfo(loadLocation.Path);
+                if (!fileInfo.Exists)
+                {
+                    Log.Error("Dev plugin path {Path} does not exist", loadLocation.Path);
+                    continue;
+                }
+
+                try
+                {
+                    // Manifests are now required for devPlugins
+                    var manifestFile = LocalPluginManifest.GetManifestFile(fileInfo);
+                    if (!manifestFile.Exists)
+                    {
+                        Log.Error("DLL at {DllPath} has no manifest, this is no longer valid", fileInfo.FullName);
+                        continue;
+                    }
+
+                    var manifest = LocalPluginManifest.Load(manifestFile);
+                    if (manifest == null)
+                    {
+                        Log.Error("Could not deserialize manifest for DLL at {DllPath}", fileInfo.FullName);
+                        continue;
+                    }
+
+                    if (manifest != null && manifest.InternalName.IsNullOrEmpty())
+                    {
+                        Log.Error("InternalName for dll at {Path} was null", manifestFile.FullName);
+                        continue;
+                    }
+
+                    devPluginDefs.Add(new PluginDef(fileInfo, manifest, loadLocation));
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "Could not load manifest for dev at {Directory}", fileInfo.FullName);
+                }
+            }
+
+            devPluginDefs.Sort(PluginDef.Sorter);
+
+            // Dev plugins should load first.
+            pluginDefs.InsertRange(0, devPluginDefs);
+        }
 
         async Task LoadPluginOnBoot(string logPrefix, PluginDef pluginDef, CancellationToken token)
         {
@@ -604,7 +597,7 @@ internal class PluginManager : IInternalDisposableService
                         pluginDef.DllFile,
                         pluginDef.Manifest,
                         PluginLoadReason.Boot,
-                        pluginDef.IsDev,
+                        pluginDef.DevPluginLocation,
                         isBoot: true);
                 }
                 catch (InvalidPluginException)
@@ -740,8 +733,17 @@ internal class PluginManager : IInternalDisposableService
                 if (t.IsFaulted)
                 {
                     Log.Error(t.Exception, "Failed to load FrameworkTickAsync/DrawAvailableAsync plugins");
+                    return;
                 }
-            }, TaskContinuationOptions.OnlyOnFaulted);
+
+                if (t.IsCanceled)
+                {
+                    Log.Error("Loading FrameworkTickAsync/DrawAvailableAsync plugins was canceled");
+                    return;
+                }
+
+                Log.Verbose("Finished async boot load");
+            });
     }
 
     /// <summary>
@@ -752,52 +754,48 @@ internal class PluginManager : IInternalDisposableService
     /// <returns>A <see cref="Task"/> representing the asynchronous operation. This function generally will not block as new plugins aren't loaded.</returns>
     public async Task ScanDevPluginsAsync()
     {
-        // devPlugins are more freeform. Look for any dll and hope to get lucky.
-        var devDllFiles = new List<FileInfo>();
-
-        foreach (var setting in this.configuration.DevPluginLoadLocations)
-        {
-            if (!setting.IsEnabled)
-                continue;
-
-            Log.Verbose("Scanning dev plugins at {Path}", setting.Path);
-
-            if (File.Exists(setting.Path))
-            {
-                devDllFiles.Add(new FileInfo(setting.Path));
-            }
-        }
-
         var listChanged = false;
 
-        foreach (var dllFile in devDllFiles)
+        foreach (var loadLocation in this.configuration.DevPluginLoadLocations)
         {
+            if (!loadLocation.IsEnabled)
+                continue;
+
+            var fileInfo = new FileInfo(loadLocation.Path);
+            if (!fileInfo.Exists)
+            {
+                Log.Error("Dev plugin path {Path} does not exist", loadLocation.Path);
+                continue;
+            }
+
+            Log.Verbose("Scanned dev plugin at {Path}", loadLocation.Path);
+
             // This file is already known to us
             lock (this.pluginListLock)
             {
-                if (this.installedPluginsList.Any(lp => lp.DllFile.FullName == dllFile.FullName))
+                if (this.installedPluginsList.Any(lp => lp.DllFile.FullName == fileInfo.FullName))
                     continue;
             }
 
             // Manifests are now required for devPlugins
-            var manifestFile = LocalPluginManifest.GetManifestFile(dllFile);
+            var manifestFile = LocalPluginManifest.GetManifestFile(fileInfo);
             if (!manifestFile.Exists)
             {
-                Log.Error("DLL at {DllPath} has no manifest, this is no longer valid", dllFile.FullName);
+                Log.Error("DLL at {DllPath} has no manifest, this is no longer valid", fileInfo.FullName);
                 continue;
             }
 
             var manifest = LocalPluginManifest.Load(manifestFile);
             if (manifest == null)
             {
-                Log.Error("Could not deserialize manifest for DLL at {DllPath}", dllFile.FullName);
+                Log.Error("Could not deserialize manifest for DLL at {DllPath}", fileInfo.FullName);
                 continue;
             }
 
             try
             {
                 // Add them to the list and let the user decide, nothing is auto-loaded.
-                await this.LoadPluginAsync(dllFile, manifest, PluginLoadReason.Installer, isDev: true, doNotLoad: true);
+                await this.LoadPluginAsync(fileInfo, manifest, PluginLoadReason.Installer, devPluginLocation: loadLocation, doNotLoad: true);
                 listChanged = true;
             }
             catch (InvalidPluginException)
@@ -820,14 +818,12 @@ internal class PluginManager : IInternalDisposableService
     /// <param name="repoManifest">The plugin definition.</param>
     /// <param name="useTesting">If the testing version should be used.</param>
     /// <param name="reason">The reason this plugin was loaded.</param>
-    /// <param name="inheritedWorkingPluginId">WorkingPluginId this plugin should inherit.</param>
     /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
     public async Task<LocalPlugin> InstallPluginAsync(
-        RemotePluginManifest repoManifest, bool useTesting, PluginLoadReason reason,
-        Guid? inheritedWorkingPluginId = null)
+        RemotePluginManifest repoManifest, bool useTesting, PluginLoadReason reason)
     {
         var stream = await this.DownloadPluginAsync(repoManifest, useTesting);
-        return await this.InstallPluginInternalAsync(repoManifest, useTesting, reason, stream, inheritedWorkingPluginId);
+        return await this.InstallPluginInternalAsync(repoManifest, useTesting, reason, stream);
     }
 
     /// <summary>
@@ -1080,27 +1076,7 @@ internal class PluginManager : IInternalDisposableService
 
             try
             {
-                // TODO: Why were we ever doing this? We should never be loading the old version in the first place
-                /*
-                    if (!plugin.IsDisabled)
-                        plugin.Disable();
-                        */
-
-                lock (this.pluginListLock)
-                {
-                    this.installedPluginsList.Remove(plugin);
-                }
-            }
-            catch (Exception ex)
-            {
-                Log.Error(ex, "Error during remove from plugin list (update)");
-                updateStatus.Status = PluginUpdateStatus.StatusKind.FailedUnload;
-                return updateStatus;
-            }
-
-            try
-            {
-                await this.InstallPluginInternalAsync(metadata.UpdateManifest, metadata.UseTesting, PluginLoadReason.Update, updateStream, workingPluginId);
+                await this.InstallPluginInternalAsync(metadata.UpdateManifest, metadata.UseTesting, PluginLoadReason.Update, updateStream, plugin);
             }
             catch (Exception ex)
             {
@@ -1157,7 +1133,7 @@ internal class PluginManager : IInternalDisposableService
     /// </summary>
     /// <param name="manifest">Plugin manifest.</param>
     /// <returns>If the manifest is eligible.</returns>
-    public bool IsManifestEligible(PluginManifest manifest)
+    public bool IsManifestEligible(RemotePluginManifest manifest)
     {
         // Testing exclusive
         if (manifest.IsTestingExclusive && !this.configuration.DoPluginTest)
@@ -1168,7 +1144,6 @@ internal class PluginManager : IInternalDisposableService
             return false;
 
         // API level - we keep the API before this in the installer to show as "outdated"
-        if (!this.LoadAllApiLevels)
         {
             var effectiveDalamudApiLevel =
                 this.CanUseTesting(manifest) &&
@@ -1177,7 +1152,7 @@ internal class PluginManager : IInternalDisposableService
                     ? manifest.TestingDalamudApiLevel.Value
                     : manifest.DalamudApiLevel;
 
-            if (effectiveDalamudApiLevel < PluginManager.DalamudApiLevel - 1)
+            if (effectiveDalamudApiLevel < DalamudApiLevel - 1)
                 return false;
         }
 
@@ -1193,19 +1168,18 @@ internal class PluginManager : IInternalDisposableService
     /// </summary>
     /// <param name="manifest">Manifest to inspect.</param>
     /// <returns>A value indicating whether the plugin/manifest has been banned.</returns>
-    public bool IsManifestBanned(PluginManifest manifest)
+    public bool IsManifestBanned(IPluginManifest manifest)
     {
-        Debug.Assert(this.bannedPlugins != null, "this.bannedPlugins != null");
+        if (this.bannedPlugins == null)
+            throw new Exception("Banned plugins not loaded");
 
         if (this.LoadBannedPlugins)
             return false;
 
-        var config = Service<DalamudConfiguration>.Get();
-
         var versionToCheck = manifest.AssemblyVersion;
-        if (config.DoPluginTest && manifest.TestingAssemblyVersion > manifest.AssemblyVersion)
+        if (manifest is RemotePluginManifest remoteManifest && this.UseTesting(remoteManifest) && remoteManifest.TestingAssemblyVersion > manifest.AssemblyVersion)
         {
-            versionToCheck = manifest.TestingAssemblyVersion;
+            versionToCheck = remoteManifest.TestingAssemblyVersion;
         }
 
         return this.bannedPlugins.Any(ban => (ban.Name == manifest.InternalName || ban.Name == Hash.GetStringSha256Hash(manifest.InternalName))
@@ -1243,8 +1217,8 @@ internal class PluginManager : IInternalDisposableService
             {
                 foreach (var plugin in this.installedPluginsList)
                 {
-                    if (plugin.AssemblyName != null &&
-                        plugin.AssemblyName.FullName == declaringType.Assembly.GetName().FullName)
+                    if (plugin.Assembly != null &&
+                        plugin.Assembly.GetName().FullName == declaringType.Assembly.GetName().FullName)
                         return plugin;
                 }
             }
@@ -1376,9 +1350,14 @@ internal class PluginManager : IInternalDisposableService
     /// <param name="useTesting">If the testing version should be used.</param>
     /// <param name="reason">The reason this plugin was loaded.</param>
     /// <param name="zipStream">Stream of the ZIP archive containing the plugin that is about to be installed.</param>
-    /// <param name="inheritedWorkingPluginId">WorkingPluginId this plugin should inherit.</param>
+    /// <param name="pluginToReplace">The plugin that is being replaced by this installation (used during an update).</param>
     /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
-    private async Task<LocalPlugin> InstallPluginInternalAsync(RemotePluginManifest repoManifest, bool useTesting, PluginLoadReason reason, Stream zipStream, Guid? inheritedWorkingPluginId = null)
+    private async Task<LocalPlugin> InstallPluginInternalAsync(
+        RemotePluginManifest repoManifest,
+        bool useTesting,
+        PluginLoadReason reason,
+        Stream zipStream,
+        LocalPlugin? pluginToReplace = null)
     {
         var version = useTesting ? repoManifest.TestingAssemblyVersion : repoManifest.AssemblyVersion;
         Log.Debug($"Installing plugin {repoManifest.Name} (testing={useTesting}, version={version}, reason={reason})");
@@ -1414,8 +1393,8 @@ internal class PluginManager : IInternalDisposableService
         else
         {
             // If we are doing anything other than a fresh install, not having a workingPluginId is an error that must be fixed
-            if (inheritedWorkingPluginId == null)
-                throw new ArgumentNullException(nameof(inheritedWorkingPluginId), "Inherited WorkingPluginId must not be null when updating");
+            if (pluginToReplace == null)
+                throw new ArgumentNullException(nameof(pluginToReplace), "Must be replacing a plugin when updating");
         }
 
         // Ensure that we have a testing opt-in for this plugin if we are installing a testing version
@@ -1472,23 +1451,36 @@ internal class PluginManager : IInternalDisposableService
             var tempDllFile = LocalPluginManifest.GetPluginFile(tempOutputDir, repoManifest);
             var tempManifestFile = LocalPluginManifest.GetManifestFile(tempDllFile);
 
-            // We need to save the repoManifest due to how the repo fills in some fields that authors are not expected to use.
-            FilesystemUtil.WriteAllTextSafe(
-                tempManifestFile.FullName,
-                JsonConvert.SerializeObject(repoManifest, Formatting.Indented));
-
             // Reload as a local manifest, add some attributes, and save again.
             var tempManifest = LocalPluginManifest.Load(tempManifestFile) ?? throw new Exception("Plugin had no valid manifest");
             if (tempManifest.InternalName != repoManifest.InternalName)
             {
                 throw new Exception(
-                    $"Distributed internal name does not match repo internal name: {tempManifest.InternalName} - {repoManifest.InternalName}");
+                    $"Distributed internal name does not match repo internal name, distributed: {tempManifest.InternalName} repo: {repoManifest.InternalName}");
+            }
+
+            if (tempManifest.AssemblyVersion != version)
+            {
+                throw new Exception(
+                    $"Distributed plugin version does not match repo version, distributed: {tempManifest.AssemblyVersion} repo: {version}");
             }
 
             if (tempManifest.WorkingPluginId != Guid.Empty)
                 throw new Exception("Plugin shall not specify a WorkingPluginId");
 
-            tempManifest.WorkingPluginId = inheritedWorkingPluginId ?? Guid.NewGuid();
+            Guid? newWorkingPluginId;
+            if (pluginToReplace != null)
+            {
+                newWorkingPluginId = pluginToReplace.EffectiveWorkingPluginId;
+                Log.Verbose("WorkingPluginId: Replace {Name} as {WorkingPluginId}", pluginToReplace.InternalName, newWorkingPluginId);
+            }
+            else
+            {
+                newWorkingPluginId = Guid.NewGuid();
+                Log.Verbose("WorkingPluginId: New {Name} as {WorkingPluginId}", tempManifest.InternalName, newWorkingPluginId);
+            }
+
+            tempManifest.WorkingPluginId = newWorkingPluginId ?? throw new Exception("Failed to pick a new WorkingPluginId");
 
             if (useTesting)
             {
@@ -1499,6 +1491,10 @@ internal class PluginManager : IInternalDisposableService
             tempManifest.InstalledFromUrl = repoManifest.SourceRepo.IsThirdParty
                                                 ? repoManifest.SourceRepo.PluginMasterUrl
                                                 : SpecialPluginSource.MainRepo;
+
+            // HACK: We need to do this at the moment so that D17 plugins can load their assets.
+            // Goat should get off his ass and fix the pipeline in Plogon to specify correct URLs
+            tempManifest.Dip17Channel = repoManifest.Dip17Channel;
 
             tempManifest.Save(tempManifestFile, "installation");
 
@@ -1511,11 +1507,8 @@ internal class PluginManager : IInternalDisposableService
             var finalManifest = LocalPluginManifest.Load(finalManifestFile) ??
                            throw new Exception("Plugin had no valid manifest after copy");
 
-            Log.Information("Installed plugin {InternalName} (testing={UseTesting})", tempManifest.Name, useTesting);
-            var plugin = await this.LoadPluginAsync(finalDllFile, finalManifest, reason);
-
-            this.NotifyInstalledPluginsChanged();
-            return plugin;
+            Log.Information("Staged plugin {InternalName} (testing={UseTesting})", tempManifest.Name, useTesting);
+            return await this.LoadPluginAsync(finalDllFile, finalManifest, reason, pluginToReplace: pluginToReplace);
         }
         catch
         {
@@ -1544,11 +1537,24 @@ internal class PluginManager : IInternalDisposableService
     /// <param name="dllFile">The <see cref="FileInfo"/> associated with the main assembly of this plugin.</param>
     /// <param name="manifest">The already loaded definition, if available.</param>
     /// <param name="reason">The reason this plugin was loaded.</param>
-    /// <param name="isDev">If this plugin should support development features.</param>
+    /// <param name="devPluginLocation">The location of the dev plugin, if we are loading a dev plugin.</param>
     /// <param name="isBoot">If this plugin is being loaded at boot.</param>
     /// <param name="doNotLoad">Don't load the plugin, just don't do it.</param>
+    /// <param name="pluginToReplace">
+    /// The plugin that is being replaced through this load (used during an update).
+    /// The plugin will be disposed and removed from the list idempotently once the new plugin is ready and valid to be
+    /// added to the loaded plugins list. This is done to avoid having plugins "disappear" after an update, if the update
+    /// fails for whatever reason.
+    /// </param>
     /// <returns>The loaded plugin.</returns>
-    private async Task<LocalPlugin> LoadPluginAsync(FileInfo dllFile, LocalPluginManifest manifest, PluginLoadReason reason, bool isDev = false, bool isBoot = false, bool doNotLoad = false)
+    private async Task<LocalPlugin> LoadPluginAsync(
+        FileInfo dllFile,
+        LocalPluginManifest manifest,
+        PluginLoadReason reason,
+        DevPluginLocationSettings? devPluginLocation = null,
+        bool isBoot = false,
+        bool doNotLoad = false,
+        LocalPlugin? pluginToReplace = null)
     {
         // TODO: Split this function - it should only take care of adding the plugin to the list, not loading itself, that should be done through the plugin instance
 
@@ -1570,10 +1576,10 @@ internal class PluginManager : IInternalDisposableService
             if (this.installedPluginsList.Any(lp => lp.DllFile.FullName == dllFile.FullName))
                 throw new InvalidOperationException("Plugin at the provided path is already loaded");
 
-            if (isDev)
+            if (devPluginLocation != null)
             {
                 Log.Information("Loading dev plugin {Name}", manifest.InternalName);
-                plugin = new LocalDevPlugin(dllFile, manifest);
+                plugin = new LocalDevPlugin(dllFile, manifest, devPluginLocation);
 
                 // This is a dev plugin - turn ImGui asserts on by default if we haven't chosen yet
                 // TODO(goat): Re-enable this when we have better tracing for what was rendering when
@@ -1585,8 +1591,25 @@ internal class PluginManager : IInternalDisposableService
                 plugin = new LocalPlugin(dllFile, manifest);
             }
 
+            if (pluginToReplace != null)
+            {
+                if (pluginToReplace.IsLoaded)
+                    throw new InvalidOperationException("Plugin must be unloaded before it can be replaced");
+
+                if (!this.installedPluginsList.Remove(pluginToReplace))
+                    throw new InvalidOperationException("Failed to remove plugin that is being replaced");
+
+                Log.Verbose("Removed plugin {Name} v{Version} from loaded plugins list", pluginToReplace.InternalName, pluginToReplace.EffectiveVersion);
+            }
+
             this.installedPluginsList.Add(plugin);
+            this.NotifyInstalledPluginsChanged();
+
+            Log.Verbose("Added plugin {Name} v{Version} to loaded plugins list", manifest.InternalName, manifest.AssemblyVersion);
         }
+
+        // Dispose old plugin instance
+        await (pluginToReplace?.DisposeAsync() ?? ValueTask.CompletedTask);
 
         Log.Verbose("Starting to load plugin {Name} at {FileLocation}", manifest.InternalName, dllFile.FullName);
 
@@ -1601,7 +1624,7 @@ internal class PluginManager : IInternalDisposableService
         var wantedByAnyProfile = false;
 
         // Now, if this is a devPlugin, figure out if we want to load it
-        if (isDev)
+        if (devPluginLocation != null)
         {
             var devPlugin = (LocalDevPlugin)plugin;
             loadPlugin &= !isBoot;
@@ -1743,14 +1766,13 @@ internal class PluginManager : IInternalDisposableService
 
             foreach (var plugin in this.installedPluginsList)
             {
-                var installedVersion = plugin.IsTesting
-                                           ? plugin.Manifest.TestingAssemblyVersion
-                                           : plugin.Manifest.AssemblyVersion;
+                var installedVersion = plugin.Manifest.AssemblyVersion;
 
                 var updates = this.AvailablePlugins
                                   .Where(remoteManifest => plugin.Manifest.InternalName == remoteManifest.InternalName)
                                   .Where(remoteManifest => plugin.Manifest.InstalledFromUrl == remoteManifest.SourceRepo.PluginMasterUrl || !remoteManifest.SourceRepo.IsThirdParty)
                                   .Where(remoteManifest => remoteManifest.MinimumDalamudVersion == null || Versioning.GetAssemblyVersionParsed() >= remoteManifest.MinimumDalamudVersion)
+                                  .Where(remoteManifest => !remoteManifest.IsTestingExclusive || this.UseTesting(remoteManifest))
                                   .Where(remoteManifest =>
                                   {
                                       var useTesting = this.UseTesting(remoteManifest);

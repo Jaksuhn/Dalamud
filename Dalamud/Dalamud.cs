@@ -76,13 +76,15 @@ internal sealed unsafe class Dalamud : IServiceType
             scanner,
             Localization.FromAssets(info.AssetDirectory!, configuration.LanguageOverride));
 
-        using (Timings.Start("HookVerifier Init"))
-        {
-            HookVerifier.Initialize(scanner);
-        }
-
         // Set up FFXIVClientStructs
         this.SetupClientStructsResolver(cacheDir);
+
+        // Set up hook verification if Developer Mode is enabled. It takes a little while at the moment
+        if (configuration.DevMode == true)
+        {
+            using var t = Timings.Start("HookVerifier Init");
+            HookVerifier.Initialize();
+        }
 
         void KickoffGameThread()
         {

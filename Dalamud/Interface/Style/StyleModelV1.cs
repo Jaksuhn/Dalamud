@@ -397,9 +397,22 @@ public class StyleModelV1 : StyleModel
             ParsedOrange = new Vector4(1f, 0.501f, 0f, 1f),
             ParsedPink = new Vector4(0.886f, 0.407f, 0.658f, 1f),
             ParsedGold = new Vector4(0.898f, 0.8f, 0.501f, 1f),
+            InfoForeground = new Vector4(0f, 0.6f, 1f, 1f),
+            InfoBackground = new Vector4(0.2f, 0.45f, 0.6f, 0.4f),
+            SuccessForeground = new Vector4(0f, 0.8f, 0.1333333f, 1f),
+            SuccessBackground = new Vector4(0.3f, 0.6f, 0.35f, 0.4f),
+            WarningForeground = new Vector4(1f, 0.709f, 0f, 1f),
+            WarningBackground = new Vector4(0.75f, 0.65f, 0.3f, 0.4f),
+            ErrorForeground = new Vector4(1f, 0f, 0f, 1f),
+            ErrorBackground = new Vector4(0.7f, 0.3f, 0.3f, 0.4f),
+            AttentionForeground = new Vector4(1f, 0.709f, 0f, 1f),
+            AttentionBackground = new Vector4(0.75f, 0.65f, 0.3f, 0.4f),
         },
 
-        WindowBlurStrength = 5f,
+        WindowBlurStrength = 0.5f,
+        WindowBlurTintActive = new Vector4(0.27200785f, 0.06505883f, 0.08736471f, 0.08107843f),
+        WindowBlurTint = new Vector4(0.014018277f, 0.014018136f, 0.014018136f, 0.08339988f),
+        WindowBlurLuminosity = Vector4.Zero,
     };
 
     /// <summary>
@@ -496,6 +509,15 @@ public class StyleModelV1 : StyleModel
     [JsonProperty("ac")]
     public float WindowBlurStrength { get; set; }
 
+    [JsonProperty("ad")]
+    public Vector4 WindowBlurTint { get; set; }
+
+    [JsonProperty("ae")]
+    public Vector4 WindowBlurTintActive { get; set; }
+
+    [JsonProperty("af")]
+    public Vector4 WindowBlurLuminosity { get; set; }
+
 #pragma warning restore SA1600
 
     /// <summary>
@@ -588,6 +610,9 @@ public class StyleModelV1 : StyleModel
         };
 
         model.WindowBlurStrength = WindowSystem.DefaultBackgroundBlurStrength;
+        model.WindowBlurTint = WindowSystem.DefaultBackgroundBlurTint;
+        model.WindowBlurTintActive = WindowSystem.DefaultBackgroundBlurTintActive;
+        model.WindowBlurLuminosity = WindowSystem.DefaultBackgroundBlurLuminosity;
 
         return model;
     }
@@ -640,6 +665,9 @@ public class StyleModelV1 : StyleModel
 
         this.BuiltInColors?.Apply();
         WindowSystem.DefaultBackgroundBlurStrength = this.WindowBlurStrength;
+        WindowSystem.DefaultBackgroundBlurTint = this.WindowBlurTint;
+        WindowSystem.DefaultBackgroundBlurTintActive = this.WindowBlurTintActive;
+        WindowSystem.DefaultBackgroundBlurLuminosity = this.WindowBlurLuminosity;
     }
 
     /// <inheritdoc/>
